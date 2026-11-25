@@ -350,3 +350,13 @@ Bốn phép thử trên URL public lần lượt trả **200 / 200 / 401 / 200**
 2. Sau bước test, Docker build image với hai tag là commit SHA và `latest`, rồi push cả hai lên registry.
 3. Cloud Build triển khai image theo commit SHA lên Cloud Run tại `asia-southeast1`, đặt biến môi trường và lấy secret từ Secret Manager.
 4. `service.yaml` mô tả cách khai báo service bằng YAML, gồm cổng 8000, ngưỡng scale, tài nguyên, probe `/health`, probe `/ready` và tham chiếu secret.
+
+## AI log
+
+| Phần | Nội dung được AI hỗ trợ |
+| --- | --- |
+| CP0–CP1 | Giải thích lỗi môi trường Ubuntu WSL2 và hỗ trợ viết bảng so sánh bản develop với production dựa trên code mẫu. |
+| CP2–CP4 | Hỗ trợ viết báo cáo, giải thích Docker layer cache, JWT, rate limit, cost guard, graceful shutdown và cách Redis chia sẻ lịch sử giữa các replica. |
+| CP5 | Hỗ trợ hoàn thiện code từ bản khung, gồm health/readiness, xác thực, rate limit và cost guard dùng Redis, log JSON, Dockerfile và Compose. |
+| CP6 | Hỗ trợ cấu hình Railway, soạn tài liệu triển khai, so sánh Railway với Render và làm rõ sự khác nhau giữa URL gốc và endpoint `/health`. |
+| CP7–CP8 | Hỗ trợ thêm histogram, bổ sung kiến thức còn thiếu cho mock agent, sửa lỗi Dockerfile khiến container không tìm thấy Uvicorn và diễn giải kết quả benchmark, trace, alert trong báo cáo. |

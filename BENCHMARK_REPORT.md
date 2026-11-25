@@ -100,61 +100,66 @@ Quality gate (accuracy ≥ 100%, không regression): ✅ PASS
 
 ## 4. Observability stack (production)
 
+CP8 chạy trong Docker Desktop trên cùng máy Windows/WSL2. Dockerfile của bản observability được sửa để cài dependency vào stage runtime đúng vị trí Python tìm kiếm. Trước khi sửa, agent thiếu module Uvicorn và Nginx trả 502. Các số đo dưới đây lấy từ stack đã build lại thành công.
+
 ### 4.1 Screenshot
 
-- [ ] Dashboard Grafana khi đang có tải (thấy rõ Golden Signals)
-- [ ] Một trace chậm trong Jaeger (thấy span nào chiếm thời gian)
-- [ ] Một trace lỗi trong Jaeger (có event `exception`)
-- [ ] Trang Alerts của Prometheus với ít nhất 2 alert cùng **firing**
+- [x] Dashboard Grafana hiển thị Golden Signals khi có tải và đang bật lỗi giả lập A/B. Tại thời điểm chụp, traffic là **15,1 req/s**, error rate **19,01%** và p95 **1,90 giây**. [Ảnh Grafana](screenshots/grafana-dashboard.png)
+- [x] Trace chậm trong Jaeger cho thấy span `chat mock-llm-small` chiếm phần lớn thời gian. [Ảnh trace chậm](screenshots/jaeger-slow-trace.png)
+- [x] Trace lỗi trong Jaeger hiển thị HTTP 503 và event `exception` trong span `chat mock-llm-small`. [Ảnh trace lỗi](screenshots/jaeger-error-trace.png)
+- [x] `AgentHighErrorRate` và `AgentHighLatencyP95` cùng **firing** trên trang Alerts. [Ảnh Prometheus](screenshots/prometheus-alert-firing.png)
 
-### 4.2 Thí nghiệm "phá hệ thống"
+**Exercise 7.4.** Locust chạy 30 user, tăng 5 user/giây, trên stack hai replica. Truy vấn trực tiếp Prometheus theo các biểu thức dùng trong Grafana cho thấy p95 **293,1 ms** và avg **233,1 ms**. Khoảng cách **60,0 ms** cho thấy nhóm request chậm có độ trễ cao hơn trung bình. Nginx phân khoảng **9,44 và 9,60 request/giây** vào hai replica tại thời điểm đo.
+
+Input đạt **1.393,73 token/giây**, còn output đạt **738,04 token/giây**. Prompt v2 gồm câu hỏi, hướng dẫn hệ thống và tài liệu retrieval. Output chỉ gồm câu trả lời. `GET /metrics` qua Nginx trả **HTTP 404** vì cấu hình chặn route này. Prometheus scrape trực tiếp các agent qua mạng Docker.
+
+### 4.2 Thí nghiệm lỗi giả lập
+
+`promtool test rules` chạy thành công với bộ test alert đi kèm. Trong lần chạy thực tế, A và B được bật cùng lúc trên hai replica, giữ Locust ở 30 user. Thời gian bên dưới tính từ lúc bắt đầu áp dụng cấu hình đến lần đầu API Prometheus trả trạng thái `firing`, thăm dò mỗi hai giây.
 
 | # | Thay đổi | Alert nào firing | Thời gian từ lúc đổi → firing | Panel nào phản ánh rõ nhất |
 |---|---|---|---|---|
-| A | `MOCK_ERROR_RATE=0.2` | | | |
-| B | `MOCK_SLOW_RATE=0.3` | | | |
-| C | `LLM_MODEL=mock-llm-large` | | | |
-| D | `docker pause` 1 instance | | | |
-| E | `AGENT_VERSION=v1` | | | |
+| A | `MOCK_ERROR_RATE=0.2` | `AgentHighErrorRate` | 89,2 giây | Error rate đạt 19,44% ở lần đầu quan sát firing. |
+| B | `MOCK_SLOW_RATE=0.3` | `AgentHighLatencyP95` | 145,2 giây | Latency p95 đạt 1,893 giây ở lần đầu quan sát firing. |
 
-**Thí nghiệm E không làm alert nào firing. Bạn sẽ phát hiện loại sự cố này trong production bằng cách nào?**
+Khi cả hai alert cùng firing, Prometheus báo error rate **21,63%** và p95 **1,893 giây**.
 
-...
+**Phát hiện suy giảm chất lượng khi đổi sang agent v1.** Chạy eval trên golden dataset trước khi deploy và định kỳ sau deploy. So sánh accuracy và kết quả từng câu với baseline đang chạy. Chặn phát hành nếu vi phạm quality gate và cảnh báo nếu accuracy giảm. Kết quả CP7 cho thấy v1 chỉ đúng 1/23 câu dù không có lỗi HTTP trong lượt eval.
 
 ### 4.3 Debug bằng trace
 
-Chọn 1 trace chậm nhất bạn tìm được:
+- Trace chậm nhất trong tập kết quả đã truy vấn từ Jaeger có ID `256fa97050d5512c343d9a44b133e6e2`. Span gốc `POST /ask` mất **1.761,384 ms**.
+- Trong `agent.run`, span `chat mock-llm-small` mất **1.682,834 ms**, tức khoảng **95,54%** của cả request. Span retrieval mất **21,364 ms**. Phần lớn thời gian nằm ở lần gọi mock LLM.
+- Trace lỗi `01cd71f12436e207355feb76d314c41f` có span `chat mock-llm-small` ở trạng thái ERROR và event `exception` loại `utils.mock_llm.LLMError`. Dòng `llm_error` trong log có cùng trace ID. [Trace chậm trong Jaeger](http://localhost:16686/trace/256fa97050d5512c343d9a44b133e6e2) · [Trace lỗi trong Jaeger](http://localhost:16686/trace/01cd71f12436e207355feb76d314c41f)
 
-- `trace_id`: ...
-- Tổng thời gian: ... ms
-- Span chiếm nhiều thời gian nhất: ... (... ms, ...%)
-- Dòng log tương ứng (grep theo `trace_id`):
+Hai dòng log độc lập đối chiếu theo `trace_id`:
 
-```json
-
+```jsonl
+{"ts":"2026-11-25T09:49:15.294190+00:00","level":"INFO","service":"observable-agent","instance":"ca3c6a24d34f","event":"llm_call","trace_id":"256fa97050d5512c343d9a44b133e6e2","span_id":"bd9370a71b0194b9","request_id":"6cad175e8c6a","model":"mock-llm-small","agent_version":"v2","input_tokens":73,"output_tokens":35,"cost_usd":3.2e-05,"llm_ms":1683.1}
+{"ts":"2026-11-25T09:50:07.919188+00:00","level":"INFO","service":"observable-agent","instance":"ca3c6a24d34f","event":"llm_error","trace_id":"01cd71f12436e207355feb76d314c41f","span_id":"9ddf726036d0e623","request_id":"4c4a03988c10","error":"Upstream LLM error: 503 Service Unavailable (mock)"}
 ```
 
 ---
 
 ## 5. Benchmark scaling (production, Locust headless, 100 users, 2 phút)
 
+Mỗi lượt tăng 10 user/giây lên 100 user, chạy 120 giây và giữ cùng model cùng cấu hình mock. Bảng dùng dòng `POST /ask` trong CSV vì Locust cũng gọi `GET /health`.
+
+Cả hai lượt dùng project Compose `k5-day14-observability`. Mỗi lần scale xong, stack có thời gian cập nhật DNS trước khi Locust bắt đầu. Locust chạy với `--headless -u 100 -r 10 -t 2m` và trỏ vào `http://nginx` trên mạng Docker.
+
 | Số instance | RPS | p50 (ms) | p95 (ms) | p99 (ms) | Failures |
 |---|---|---|---|---|---|
-| 1 | | | | | |
-| 3 | | | | | |
+| 1 | 60,03 | 190 | 220 | 1.700 | 80/7.165 (1,12%) |
+| 3 | 59,76 | 190 | 220 | 1.700 | 63/7.110 (0,89%) |
 
-**Giải thích kết quả:** Scale có cải thiện p95 không? Nút thắt nằm ở đâu?
-
-...
+P95 giữ nguyên ở 220 ms và RPS gần như không đổi. Với mức tải này, thời gian chờ của mỗi người dùng giả lập và latency được chèn trong mock LLM vẫn chi phối kết quả. Nginx có phân tải, nhưng thêm replica không rút ngắn lần gọi mock LLM của một request. Chênh lệch tỷ lệ lỗi giữa hai lượt phù hợp với lỗi upstream được mô phỏng ngẫu nhiên. [CSV 1 replica](benchmark-results/scale_1_stats.csv) · [CSV 3 replica](benchmark-results/scale_3_stats.csv)
 
 ---
 
 ## 6. Kết luận
 
-- 3 điều bạn học được về benchmark & observability:
-  1. ...
-  2. ...
-  3. ...
-- Nếu đưa agent này lên production thật, bạn sẽ thêm metric / alert nào nữa?
+1. Đo cả p95 và p99 giúp thấy nhóm request rất chậm dù p50 và average còn thấp.
+2. Số liệu phân tải theo replica cho biết Nginx chia tải ra sao. Trace cho biết thêm replica có tác động được đến bước gây chậm hay không.
+3. Eval theo từng câu bắt được regression chất lượng và cost trên mỗi câu đúng phản ánh giá trị của mỗi lần gọi LLM.
 
-...
+Trong production, theo dõi thêm tỷ lệ 502/504 ở Nginx và chạy probe từ bên ngoài để phát hiện lỗi xảy ra trước khi request tới agent. Chạy eval định kỳ để phát hiện chất lượng suy giảm dù latency và tỷ lệ lỗi HTTP vẫn trong ngưỡng.
