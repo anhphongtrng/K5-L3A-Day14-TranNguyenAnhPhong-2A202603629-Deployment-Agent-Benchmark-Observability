@@ -44,3 +44,119 @@ Endpoint nhận `question` qua query string và trả JSON chứa câu trả l�
 
 Kiểm tra bản `production` trong Ubuntu WSL2 bằng cấu hình mặc định. `GET /health`, `GET /ready` và `POST /ask` với JSON `{"question":"Hello"}` đều trả HTTP 200. Sau khi gửi SIGTERM lúc server đang rảnh, Uvicorn ghi `Application shutdown complete.` và tiến trình thoát với mã 0.
 
+## Part 2 — Docker
+
+### Exercise 2.1 — Dockerfile cơ bản
+
+1. **Base image.** `FROM python:3.11` dùng image Python chính thức với Python 3.11 làm nền cho image của agent.
+2. **Working directory.** `WORKDIR /app` đặt thư mục làm việc bên trong container là `/app`. Đích tương đối `.` trong các lệnh `COPY` trỏ đến thư mục này. Khi container khởi động, `python app.py` cũng chạy từ đây.
+3. **Thứ tự copy.** Docker copy `requirements.txt` rồi chạy `pip install` trước khi copy mã nguồn. Nếu chỉ sửa `app.py` và các bước trước đó vẫn có cache, Docker có thể dùng lại lớp đã cài dependencies. Khi `requirements.txt` thay đổi, bước cài dependencies sẽ chạy lại.
+4. **`CMD` và `ENTRYPOINT`.** `CMD ["python", "app.py"]` cung cấp lệnh mặc định. Dockerfile này dùng `CMD` để khởi động agent. Lệnh đặt sau tên image trong `docker run` có thể thay thế giá trị `CMD`. Nếu cấu hình `ENTRYPOINT` ở dạng exec, nó xác định chương trình chính và `CMD` có thể cung cấp đối số mặc định cho chương trình đó. Dùng `--entrypoint` để ghi đè `ENTRYPOINT`.
+
+### Exercise 2.2 — Build và chạy container
+
+Các lệnh được chạy từ gốc repo trong Ubuntu WSL2:
+
+```bash
+docker build -f 02-docker/develop/Dockerfile -t my-agent:develop .
+docker run --rm -d -p 127.0.0.1:8000:8000 my-agent:develop
+curl -i -X POST 'http://localhost:8000/ask?question=What%20is%20Docker%3F'
+docker images my-agent:develop
+```
+
+Kết quả gọi agent (trích):
+
+```http
+HTTP/1.1 200 OK
+content-type: application/json
+
+{"answer":"Container là cách đóng gói app để chạy ở mọi nơi. Build once, run anywhere!"}
+```
+
+Kết quả `docker images my-agent:develop` (trích):
+
+```text
+IMAGE              ID             DISK USAGE   CONTENT SIZE   EXTRA
+my-agent:develop   d4ffcc414c99       1.15GB             0B   U
+```
+
+Dung lượng ghi nhận ở cột `DISK USAGE` là **1.15 GB**. Container được dừng và tự xóa sau khi kiểm tra.
+
+### Exercise 2.3 — Multi-stage build
+
+1. **Stage 1 · Builder.** Dùng `python:3.11-slim`, cài `gcc` và `libpq-dev` để hỗ trợ build dependency khi cần. Sau đó, `pip install --user` cài các gói Python từ `requirements.txt` vào `/root/.local`.
+2. **Stage 2 · Runtime.** Bắt đầu từ một image `python:3.11-slim` mới, copy các gói Python đã cài sang `/home/appuser/.local` và thêm mã nguồn. Uvicorn chạy dưới tài khoản `appuser`.
+3. **Vì sao image nhỏ hơn?** Runtime dùng base image `slim` và chỉ lấy gói Python cần để chạy từ builder. Các công cụ build như `gcc` và gói header `libpq-dev` nằm ở stage builder.
+
+Các lệnh build và đo dung lượng được chạy từ gốc repo:
+
+```bash
+docker build -f 02-docker/production/Dockerfile -t my-agent:advanced .
+docker images my-agent
+docker image inspect --format '{{.RepoTags}} {{.Size}}' my-agent:develop my-agent:advanced
+```
+
+Kết quả `docker images` (trích):
+
+```text
+IMAGE               ID             DISK USAGE   CONTENT SIZE   EXTRA
+my-agent:advanced   306087538fa9        163MB             0B
+my-agent:develop    d4ffcc414c99       1.15GB             0B   U
+```
+
+`docker image inspect` ghi nhận **1.154.311.927 byte** cho bản `develop` và **162.892.338 byte** cho bản `advanced`. Tính theo số byte trước khi làm tròn, dung lượng giảm **85,89%** theo công thức `(1 − 162892338 / 1154311927) × 100`.
+
+### Exercise 2.4 — Docker Compose stack
+
+```mermaid
+flowchart LR
+    Client["Client · localhost:80"]
+    subgraph Internal["Mạng bridge internal"]
+        Nginx["nginx:80 · reverse proxy"]
+        Agent["agent:8000 · FastAPI"]
+        Redis["redis:6379 · cache"]
+        Qdrant["qdrant:6333 · vector database"]
+        Nginx -->|HTTP proxy| Agent
+        Agent -.->|REDIS_URL| Redis
+        Agent -.->|QDRANT_URL| Qdrant
+    end
+    Client -->|HTTP| Nginx
+```
+
+Compose chạy bốn service trên cùng mạng bridge. Nginx nhận HTTP từ cổng 80 của host và chuyển tiếp đến `agent:8000` theo tên service. Compose chờ Redis và Qdrant đạt trạng thái healthy trước khi khởi động agent. Các mũi tên nét đứt thể hiện URL được cấu hình cho agent. Endpoint `/ask` trong mẫu gọi mock LLM trực tiếp.
+
+Các lệnh chạy trong `02-docker/production/`:
+
+```bash
+touch .env.local
+docker compose -p k5-day14-docker up -d --build --wait --wait-timeout 120
+docker compose -p k5-day14-docker ps
+curl -i http://localhost/health
+curl -i -X POST http://localhost/ask \
+  -H 'Content-Type: application/json' \
+  -d '{"question":"Explain microservices"}'
+docker compose -p k5-day14-docker down
+```
+
+Kết quả `docker compose ps` xác nhận `agent`, `redis` và `qdrant` đều `Up (healthy)`, còn `nginx` ở trạng thái `Up`.
+
+`GET /health` qua Nginx (trích):
+
+```http
+HTTP/1.1 200 OK
+Server: nginx
+Content-Type: application/json
+
+{"status":"ok","uptime_seconds":4.5,"version":"2.0.0","timestamp":"2026-11-25T08:12:00.563693"}
+```
+
+`POST /ask` qua Nginx (trích):
+
+```http
+HTTP/1.1 200 OK
+Server: nginx
+Content-Type: application/json
+
+{"answer":"Tôi là AI agent được deploy lên cloud. Câu hỏi của bạn đã được nhận."}
+```
+
