@@ -31,7 +31,7 @@ content-type: application/json
 {"answer":"Tôi là AI agent được deploy lên cloud. Câu hỏi của bạn đã được nhận."}
 ```
 
-Endpoint nhận `question` qua query string và trả JSON chứa câu trả lời của mock LLM. HTTP 200 xác nhận luồng hỏi đáp hoạt động trên máy local. Trước khi đưa app lên production, cần xử lý các vấn đề ở Exercise 1.1.
+Endpoint nhận `question` qua query string và trả JSON chứa câu trả lời của mock LLM. HTTP 200 xác nhận luồng hỏi đáp hoạt động trên máy local.
 
 ### Exercise 1.3 — So sánh develop và production
 
@@ -301,4 +301,29 @@ Total messages: 10
 
 Ba replica đã xử lý request của cùng phiên và lịch sử đọc được đủ năm cặp câu hỏi–trả lời, vì các replica dùng chung Redis. Phép thử xác nhận lịch sử xuyên replica. Sau các phép thử, stack được dừng bằng `docker compose -p k5-day14-scaling down`.
 
-Endpoint nhận `question` qua query string và trả JSON chứa câu trả lời của mock LLM. HTTP 200 xác nhận luồng hỏi đáp hoạt động trên máy local. Trước khi đưa app lên production, cần xử lý các vấn đề ở Exercise 1.1.
+## CP5 — Phần 5 · Final Project
+
+Agent nằm trong `06-lab-complete/`. Redis lưu cửa sổ rate limit theo API key và ngân sách ngày dùng chung giữa các worker. Cost guard giữ trước chi phí ước tính, sau đó đối soát theo số token giả lập của phản hồi. Dockerfile multi-stage chạy agent bằng tài khoản non-root. Cấu hình deploy dùng Railway.
+
+Kết quả chạy đầy đủ `python check_production_ready.py` trong Ubuntu WSL2 với Python 3.11 và Docker:
+
+```text
+  📋 Checklist Deliverable
+     ✅ Dockerfile (multi-stage, < 500 MB)
+     ✅ docker-compose.yml (agent + redis)
+     ✅ .dockerignore
+     ✅ Health check endpoint (GET /health)
+     ✅ Readiness endpoint (GET /ready)
+     ✅ API Key authentication
+     ✅ Rate limiting
+     ✅ Cost guard
+     ✅ Config từ environment variables
+     ✅ Structured logging
+     ✅ Graceful shutdown
+     ✅ Public URL ready (Railway / Render config)
+----------------------------------------------------------------
+  Result: 12/12 tiêu chí đạt · 41/41 checks passed
+  🎉 PASS 12/12 — PRODUCTION READY! Deploy nào!
+```
+
+Image có dung lượng **160 MB** theo bộ chấm. Khi Redis mất kết nối, `/health` vẫn trả **200** và `/ready` trả **503**. Rate limit vẫn trả **429** sau khi restart agent. Với ngân sách thử nghiệm gần 0, request đầu tiên trả **402**. Request đang xử lý khi nhận SIGTERM vẫn trả **200**. Container thoát với mã **0** sau **0,5 giây** trong phép thử `docker stop`.
