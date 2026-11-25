@@ -241,4 +241,64 @@ Before usage: accepted
 After simulated usage: 402 {'error': 'Daily budget exceeded', 'used_usd': 1.2, 'budget_usd': 1.0, 'resets_at': 'midnight UTC'}
 ```
 
+## CP4 — Phần 4 · Scaling & Reliability
+
+### Exercise 5.1 — Health checks
+
+`GET /health` là liveness probe, dùng để kiểm tra agent còn chạy. `GET /ready` là readiness probe, dùng để quyết định có chuyển traffic đến agent hay không. Trong bản `production` của CP4, readiness kiểm tra Redis bằng `PING`. Khi Redis mất kết nối, tiến trình vẫn sống nhưng không sẵn sàng phục vụ các request cần dữ liệu phiên.
+
+Kết quả gọi qua Nginx tại `localhost:8080`:
+
+| Trạng thái | `GET /health` | `GET /ready` |
+| --- | --- | --- |
+| Redis đang chạy | HTTP 200, `"status":"ok"`, `"redis_connected":true` | HTTP 200, `"ready":true` |
+| Dừng Redis của stack thử nghiệm | HTTP 200, `"status":"degraded"`, `"redis_connected":false` | HTTP 503, `{"detail":"Redis not available"}` |
+
+### Exercise 5.2 — Graceful shutdown
+
+Uvicorn xử lý SIGTERM, dừng nhận kết nối mới và chờ request đang xử lý. Bản `develop` đặt thời gian chờ tối đa 30 giây. Khi chạy hook shutdown của FastAPI, ứng dụng hạ cờ readiness và ghi log. Hook này cũng là nơi có thể đóng các kết nối do ứng dụng quản lý.
+
+Trong Ubuntu WSL2, bản `develop` được chạy trên cổng 8052. SIGTERM được gửi khoảng 0,5 giây sau khi bắt đầu `POST /ask?question=Long%20task`, khi request mock vẫn đang xử lý. Kết quả thực tế (trích):
+
+```text
+INFO:     Shutting down
+INFO:     127.0.0.1:55494 - "POST /ask?question=Long%20task HTTP/1.1" 200 OK
+INFO:     Waiting for application shutdown.
+INFO:     Application shutdown complete.
+```
+
+Client nhận **HTTP 200** và tiến trình thoát với mã **0**.
+
+### Exercise 5.3 — Stateless design
+
+Mỗi replica có bộ nhớ riêng. Nếu lịch sử nằm trong RAM của agent, request sau có thể đến một replica không có dữ liệu của phiên, và việc restart replica có thể làm mất lịch sử. Bản `production` lưu phiên theo khóa `session:{session_id}` trong Redis dùng chung, với TTL mặc định 3.600 giây. Khi client gửi lại cùng `session_id`, bất kỳ replica nào cũng có thể đọc và ghi lịch sử của phiên qua Redis.
+
+### Exercise 5.4 — Load balancing
+
+Các lệnh được chạy trong `05-scaling-reliability/production/`:
+
+```bash
+touch .env.local
+docker compose -p k5-day14-scaling up -d --build --scale agent=3 --wait
+docker compose -p k5-day14-scaling ps
+python3 test_stateless.py
+```
+
+`docker compose ps` cho thấy cả ba container `agent-1`, `agent-2`, `agent-3` ở trạng thái `Up (healthy)`. Nginx nhận HTTP ở cổng host 8080 và phân phối request tới các replica của `agent:8000`. Trường `served_by` cho biết instance đã xử lý từng request. Năm request trong lần kiểm tra lần lượt đến `instance-48dd7e`, `instance-a779d1`, `instance-16acdc`, `instance-48dd7e` và `instance-a779d1`.
+
+### Exercise 5.5 — Tự kiểm tra stateless
+
+`test_stateless.py` gửi năm câu hỏi qua `POST /chat`, tái sử dụng cùng một `session_id`, rồi đọc lịch sử qua `GET /chat/{session_id}/history`. Kết quả thực tế (trích):
+
+```text
+Total requests: 5
+Instances used: {'instance-48dd7e', 'instance-16acdc', 'instance-a779d1'}
+✅ All requests served despite different instances!
+
+--- Conversation History ---
+Total messages: 10
+```
+
+Ba replica đã xử lý request của cùng phiên và lịch sử đọc được đủ năm cặp câu hỏi–trả lời, vì các replica dùng chung Redis. Phép thử xác nhận lịch sử xuyên replica. Sau các phép thử, stack được dừng bằng `docker compose -p k5-day14-scaling down`.
+
 Endpoint nhận `question` qua query string và trả JSON chứa câu trả lời của mock LLM. HTTP 200 xác nhận luồng hỏi đáp hoạt động trên máy local. Trước khi đưa app lên production, cần xử lý các vấn đề ở Exercise 1.1.
