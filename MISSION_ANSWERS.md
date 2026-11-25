@@ -327,3 +327,26 @@ Kết quả chạy đầy đủ `python check_production_ready.py` trong Ubuntu 
 ```
 
 Image có dung lượng **160 MB** theo bộ chấm. Khi Redis mất kết nối, `/health` vẫn trả **200** và `/ready` trả **503**. Rate limit vẫn trả **429** sau khi restart agent. Với ngân sách thử nghiệm gần 0, request đầu tiên trả **402**. Request đang xử lý khi nhận SIGTERM vẫn trả **200**. Container thoát với mã **0** sau **0,5 giây** trong phép thử `docker stop`.
+
+## CP6 — Phần 6 · Cloud Deployment
+
+### Exercise 3.1 — Railway
+
+Agent trong `06-lab-complete/` được deploy lên Railway trong project `k5-day14-cp6`. Service `day14-agent` kết nối tới Redis qua mạng nội bộ. [Mở endpoint `/health`](https://day14-agent-production-b49979a0.up.railway.app/health) · [Chi tiết triển khai và bằng chứng](DEPLOYMENT.md).
+
+Bốn phép thử trên URL public lần lượt trả **200 / 200 / 401 / 200** cho `GET /health`, `GET /ready`, `POST /ask` thiếu key và `POST /ask` có key hợp lệ. [Ảnh kết quả](screenshots/test.png)
+
+### Exercise 3.2 — So sánh Railway và Render
+
+| Tiêu chí | Railway | Render |
+| --- | --- | --- |
+| Phạm vi cấu hình | [`railway.toml`](06-lab-complete/railway.toml) chọn builder Dockerfile và cấu hình deploy cho service agent. | [`render.yaml` mẫu](03-cloud-deployment/render/render.yaml) là Blueprint YAML có thể khai báo nhiều service, gồm web và Redis. |
+| Cách build | Agent CP5 được build từ Dockerfile và lắng nghe trên cổng `PORT` lúc chạy. | Blueprint mẫu dùng Python runtime, cài từ `requirements.txt` và gọi Uvicorn qua `startCommand`. Với agent CP5, Blueprint có thể chọn Docker runtime để dùng cùng Dockerfile. |
+| Health check và secret | `healthcheckPath = "/health"`. Redis và biến môi trường được cấu hình cho service trên Railway. | `healthCheckPath: /health`. Blueprint mẫu dùng `generateValue` để tạo API key và `sync: false` để nhập secret qua dashboard. |
+
+### Exercise 3.3 — Pipeline Cloud Run
+
+1. `cloudbuild.yaml` cài dependencies và chạy pytest trong bước `test`.
+2. Sau bước test, Docker build image với hai tag là commit SHA và `latest`, rồi push cả hai lên registry.
+3. Cloud Build triển khai image theo commit SHA lên Cloud Run tại `asia-southeast1`, đặt biến môi trường và lấy secret từ Secret Manager.
+4. `service.yaml` mô tả cách khai báo service bằng YAML, gồm cổng 8000, ngưỡng scale, tài nguyên, probe `/health`, probe `/ready` và tham chiếu secret.
