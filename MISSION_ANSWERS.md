@@ -1,6 +1,6 @@
 # Day 14 — Mission Answers
 
-## Part 1 — Localhost vs Production
+## CP1 — Phần 1 · Localhost vs Production
 
 ### Exercise 1.1 — Anti-patterns
 
@@ -44,7 +44,7 @@ Endpoint nhận `question` qua query string và trả JSON chứa câu trả l�
 
 Kiểm tra bản `production` trong Ubuntu WSL2 bằng cấu hình mặc định. `GET /health`, `GET /ready` và `POST /ask` với JSON `{"question":"Hello"}` đều trả HTTP 200. Sau khi gửi SIGTERM lúc server đang rảnh, Uvicorn ghi `Application shutdown complete.` và tiến trình thoát với mã 0.
 
-## Part 2 — Docker
+## CP2 — Phần 2 · Docker
 
 ### Exercise 2.1 — Dockerfile cơ bản
 
@@ -160,3 +160,85 @@ Content-Type: application/json
 {"answer":"Tôi là AI agent được deploy lên cloud. Câu hỏi của bạn đã được nhận."}
 ```
 
+## CP3 — Phần 3 · API Security
+
+### Exercise 4.1 — API Key authentication
+
+- **Vị trí kiểm tra.** Trong [`04-api-gateway/develop/app.py`](04-api-gateway/develop/app.py), `APIKeyHeader` đọc header `X-API-Key`, còn `verify_api_key()` đối chiếu giá trị với `AGENT_API_KEY` (dòng 35–54). `POST /ask` khai báo `Depends(verify_api_key)` ở dòng 70 nên việc xác thực diễn ra trước khi xử lý câu hỏi.
+- **Key sai hoặc thiếu.** Mẫu trả `403 Forbidden` cho key sai và `401 Unauthorized` khi thiếu key. Key hợp lệ cho phép xử lý request.
+- **Đổi key.** Cập nhật `AGENT_API_KEY` trong nơi cấu hình môi trường, khởi động lại hoặc triển khai lại agent để nạp giá trị mới, rồi cập nhật key phía client. Bản mẫu chỉ chấp nhận một key tại một thời điểm và đọc giá trị khi khởi động.
+
+Bản `develop` được chạy trên `127.0.0.1:8041` trong Ubuntu WSL2 vì cổng 8000 đang bận. Ba request đều gửi JSON `{"question":"Hello"}` đến `POST /ask`. Header được bỏ qua, gửi key sai hoặc gửi key hợp lệ tương ứng với ba kết quả sau.
+
+```http
+HTTP/1.1 401 Unauthorized
+
+{"detail":"Missing API key. Include header: X-API-Key: <your-key>"}
+```
+
+```http
+HTTP/1.1 403 Forbidden
+
+{"detail":"Invalid API key."}
+```
+
+```http
+HTTP/1.1 200 OK
+
+{"question":"Hello","answer":"Đây là câu trả lời từ AI agent (mock). Trong production, đây sẽ là response từ OpenAI/Anthropic."}
+```
+
+### Exercise 4.2 — JWT authentication
+
+1. Trên bản `production` của Part 4, `POST /auth/token` kiểm tra thông tin đăng nhập của tài khoản mẫu `student`. Khi xác thực thành công, server ký JWT có thời hạn 60 phút.
+2. Client gửi JWT trong header `Authorization: Bearer <token>` khi gọi `POST /ask`. Dependency `verify_token()` trong [`auth.py`](04-api-gateway/production/auth.py) kiểm tra chữ ký và thời hạn trước khi endpoint xử lý câu hỏi.
+
+Bản mẫu chạy trên `127.0.0.1:8042` trong Ubuntu WSL2. Kết quả thực tế của `POST /auth/token` (trích, token đã được che):
+
+```http
+HTTP/1.1 200 OK
+
+{"access_token":"[đã che]","token_type":"bearer","expires_in_minutes":60}
+```
+
+Kết quả `POST /ask` với JWT vừa cấp và body `{"question":"Explain JWT"}` (trích):
+
+```http
+HTTP/1.1 200 OK
+
+{"question":"Explain JWT","answer":"Agent đang hoạt động tốt! (mock response) Hỏi thêm câu hỏi đi nhé.","usage":{"requests_remaining":9,"budget_remaining_usd":1.6e-05}}
+```
+
+### Exercise 4.3 — Rate limiting
+
+- **Thuật toán.** [`rate_limiter.py`](04-api-gateway/production/rate_limiter.py) dùng cửa sổ trượt 60 giây. Mỗi lần gọi, limiter loại bỏ timestamp đã ra khỏi cửa sổ rồi đếm request còn lại theo username. Nếu đã đạt ngưỡng, request mới nhận HTTP 429.
+- **Ngưỡng theo vai trò.** Tài khoản `student` dùng ngưỡng **10 request/phút**. Vai trò `admin` được xác thực dùng bộ giới hạn riêng ở mức **100 request/phút**.
+
+Thử nghiệm gửi 20 request tuần tự đến `POST /ask` trên agent local vừa khởi động, dùng JWT hợp lệ của tài khoản `student`. Request **1–10** trả **200**, request **11–20** trả **429**. Phản hồi của request thứ 11 (trích):
+
+```http
+HTTP/1.1 429 Too Many Requests
+x-ratelimit-limit: 10
+x-ratelimit-remaining: 0
+retry-after: 59
+content-type: application/json
+
+{"detail":{"error":"Rate limit exceeded","limit":10,"window_seconds":60,"retry_after_seconds":59}}
+```
+
+Header `Retry-After: 59` cho biết số giây cần đợi trước khi thử lại tại thời điểm đo.
+
+### Exercise 4.4 — Cost guard
+
+Trong [cost guard mẫu](04-api-gateway/production/cost_guard.py), `POST /ask` kiểm tra ngân sách trước khi gọi mock LLM. Sau khi có phản hồi, `record_usage()` cộng token đầu vào và đầu ra vào bộ đếm của tài khoản. Chi phí được tính theo công thức `(input_tokens / 1000 × giá input mỗi 1000 token) + (output_tokens / 1000 × giá output mỗi 1000 token)`. Mẫu lưu bộ đếm trong bộ nhớ và trả **402 Payment Required** khi mức sử dụng của tài khoản chạm ngân sách ngày.
+
+**Thiết kế ngân sách 10 USD/người/tháng.** Dùng Redis để các replica chia sẻ số đã chi theo khóa `budget:{user_id}:{YYYY-MM}`, với tháng tính theo UTC. Trước khi gọi LLM, ước tính chi phí của request, gồm chi phí đầu vào và mức đầu ra tối đa được cấp. Dùng một thao tác nguyên tử trong Redis để đọc số đã chi, kiểm tra tổng sau khi giữ trước khoản ước tính và chỉ cộng khoản giữ trước nếu tổng không vượt **10 USD**. Nếu vượt, `check_budget()` trả `False` và API trả **402**. Khi có số token thực tế, cập nhật bộ đếm với phần chênh lệch so với khoản đã giữ. Tháng mới dùng khóa mới và TTL dọn các khóa cũ.
+
+**Kiểm tra trên code mẫu.** Gọi trực tiếp `CostGuard.check_budget()` với ngân sách ngày 1 USD và nạp số token giả lập tương ứng 1,20 USD. Kết quả chương trình trước và sau khi nạp:
+
+```text
+Before usage: accepted
+After simulated usage: 402 {'error': 'Daily budget exceeded', 'used_usd': 1.2, 'budget_usd': 1.0, 'resets_at': 'midnight UTC'}
+```
+
+Endpoint nhận `question` qua query string và trả JSON chứa câu trả lời của mock LLM. HTTP 200 xác nhận luồng hỏi đáp hoạt động trên máy local. Trước khi đưa app lên production, cần xử lý các vấn đề ở Exercise 1.1.
